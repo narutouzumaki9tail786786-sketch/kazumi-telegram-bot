@@ -1,0 +1,925 @@
+# Copyright (c) 2025 Telegram:- @WTF_Phantom <DevixOP>
+# Location: Supaul, Bihar 
+#
+# All rights reserved.
+#
+# This code is the intellectual property of @WTF_Phantom.
+# You are not allowed to copy, modify, redistribute, or use this
+# code for commercial or personal projects without explicit permission.
+#
+# Allowed:
+# - Forking for personal learning
+# - Submitting improvements via pull requests
+#
+# Not Allowed:
+# - Claiming this code as your own
+# - Re-uploading without credit or permission
+# - Selling or using commercially
+#
+# Contact for permissions:
+# Email: king25258069@gmail.com
+
+import html
+import re
+import asyncio
+import collections
+import functools
+import inspect
+import time
+from datetime import datetime, timedelta, timezone
+from telegram import Bot, User, Chat, InlineKeyboardButton, Message
+from telegram.constants import ParseMode, ChatType
+from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError, TimedOut
+from telegram.ext import ExtBot
+from kazumi.database import users_collection, sudoers_collection, groups_collection
+from kazumi.config import OWNER_ID, SUDO_IDS_STR, LOGGER_ID, BOT_NAME, AUTO_REVIVE_HOURS, AUTO_REVIVE_BONUS, LEVEL_UP_BASE, LEVEL_UP_MULTIPLIER, LEVEL_COIN_REWARD
+from kazumi.emojis import EMOJI_IDS
+
+SUDO_USERS = set()
+_TRACK_CACHE = collections.OrderedDict()
+_TRACK_INTERVAL = 45
+_MAX_TRACK_CACHE = 10_000
+_MEDIA_ROTATION_INDEX = {}
+
+EMOJI_FLOWER = "\U0001F338"
+EMOJI_CLINK = "\U0001F942"
+EMOJI_BROKEN_HEART = "\U0001F494"
+EMOJI_POLICE_WOMAN = "\U0001F46E\u200d\u2640\ufe0f"
+EMOJI_MONEY_WINGS = "\U0001F4B8"
+EMOJI_SCROLL = "\U0001F4DC"
+EMOJI_USER = "\U0001F464"
+EMOJI_CASTLE = "\U0001F3F0"
+EMOJI_ACTION = "\U0001F3AC"
+EMOJI_LINK = "\U0001F517"
+EMOJI_LOCK = "\U0001F512"
+EMOJI_CLOCK = "\u231A"
+EMOJI_HEARTS = "\U0001F493"
+EMOJI_CROSS = "\u274C"
+CUSTOM_EMOJI_BUTTON_LABEL = "\u200b"
+TELEGRAM_RETRY_ATTEMPTS = 2
+TELEGRAM_EDIT_RETRY_ATTEMPTS = 3
+TELEGRAM_RETRY_BASE_DELAY = 0.75
+TELEGRAM_RETRY_AFTER_CAP_SECONDS = 5.0
+
+DAILY_STREAK_BONUS_STEP = 500
+DAILY_STREAK_BONUS_CAP = 25_000
+PROTECTION_FREE_MAX_DURATION = timedelta(hours=48)   # Phoenix Blessing grants 48h — must not be capped lower
+PROTECTION_PREMIUM_MAX_DURATION = timedelta(days=7)  # VIP users can get up to 7-day protection (Anti-Rob Guard)
+
+CHANNEL_SENDER_IDS = {1087968824, 777000, 136817688}
+
+def is_channel_sender(update) -> bool:
+    """Check if the update originated from a Channel persona instead of a personal user account."""
+    if not update:
+        return False
+    msg = getattr(update, "effective_message", None)
+    if msg and getattr(msg, "sender_chat", None):
+        eff_chat = getattr(update, "effective_chat", None)
+        if eff_chat and msg.sender_chat.id == eff_chat.id:
+            return False
+        return True
+    user = getattr(update, "effective_user", None)
+    if user and user.id in CHANNEL_SENDER_IDS:
+        return True
+    return False
+
+def pick_rotating_media(key, media_pool):
+    """Pick media in round-robin order so action GIFs do not repeat back-to-back."""
+    items = [item for item in media_pool if item]
+    if not items:
+        return None
+    if len(items) == 1:
+        return items[0]
+
+    current = _MEDIA_ROTATION_INDEX.get(key, -1)
+    next_index = (current + 1) % len(items)
+    _MEDIA_ROTATION_INDEX[key] = next_index
+    return items[next_index]
+
+def reload_sudoers():
+    """Loads Sudo users from Env and DB."""
+    try:
+        SUDO_USERS.clear()
+        SUDO_USERS.add(OWNER_ID)
+        if SUDO_IDS_STR:
+            for x in SUDO_IDS_STR.split(","):
+                if x.strip().isdigit(): SUDO_USERS.add(int(x.strip()))
+        for doc in sudoers_collection.find({}):
+            SUDO_USERS.add(doc["user_id"])
+    except Exception as e:
+        print(f"Sudo Load Error: {e}")
+
+reload_sudoers()
+
+# --- AESTHETIC FONT ENGINE ---
+def stylize_text(text):
+    """Converts normal text to Aesthetic Math Sans Bold."""
+    font_map = {
+        'A': 'ᴀ', 'B': 'ʙ', 'C': 'ᴄ', 'D': 'ᴅ', 'E': 'ᴇ', 'F': 'ғ', 'G': 'ɢ',
+        'H': 'ʜ', 'I': 'ɪ', 'J': 'ᴊ', 'K': 'ᴋ', 'L': 'ʟ', 'M': 'ᴍ', 'N': 'ɴ',
+        'O': 'ᴏ', 'P': 'ᴘ', 'Q': 'ǫ', 'R': 'ʀ', 'S': 's', 'T': 'ᴛ', 'U': 'ᴜ',
+        'V': 'ᴠ', 'W': 'ᴡ', 'X': 'x', 'Y': 'ʏ', 'Z': 'ᴢ',
+        'a': 'ᴀ', 'b': 'ʙ', 'c': 'ᴄ', 'd': 'ᴅ', 'e': 'ᴇ', 'f': 'ғ', 'g': 'ɢ',
+        'h': 'ʜ', 'i': 'ɪ', 'j': 'ᴊ', 'k': 'ᴋ', 'l': 'ʟ', 'm': 'ᴍ', 'n': 'ɴ',
+        'o': 'ᴏ', 'p': 'ᴘ', 'q': 'ǫ', 'r': 'ʀ', 's': 's', 't': 'ᴛ', 'u': 'ᴜ',
+        'v': 'ᴠ', 'w': 'ᴡ', 'x': 'x', 'y': 'ʏ', 'z': 'ᴢ',
+        '0': '\U0001D7CE', '1': '\U0001D7CF', '2': '\U0001D7D0', '3': '\U0001D7D1', '4': '\U0001D7D2',
+        '5': '\U0001D7D3', '6': '\U0001D7D4', '7': '\U0001D7D5', '8': '\U0001D7D6', '9': '\U0001D7D7'
+    }
+
+    def apply_style(t):
+        return "".join(font_map.get(c, c) for c in t)
+
+    # Skip Mentions, Links, Commands, and HTML Tags
+    pattern = r"(@\w+|https?://\S+|`[^`]+`|/[a-zA-Z0-9_]+|<[^>]+>)"
+    parts = re.split(pattern, str(text))
+    result = []
+    for part in parts:
+        if re.match(pattern, part): result.append(part)
+        else: result.append(apply_style(part))
+
+    return "".join(result)
+
+# --- PREMIUM EMOJI ENGINE ---
+# Pre-normalize EMOJI_IDS to avoid repeating work on every message
+VARIATION_SELECTOR_16 = "\ufe0f"
+NORMALIZED_EMOJI_IDS = {k.replace(VARIATION_SELECTOR_16, ""): v for k, v in EMOJI_IDS.items()}
+SORTED_EMOJIS = sorted(NORMALIZED_EMOJI_IDS.keys(), key=len, reverse=True)
+EMOJI_PATTERN = "|".join(f"{re.escape(e)}{VARIATION_SELECTOR_16}?" for e in SORTED_EMOJIS)
+EMOJI_RE = re.compile(EMOJI_PATTERN) if EMOJI_PATTERN else None
+
+def apply_custom_emojis(text, remove_fallback=False):
+    """Replace configured Unicode emojis with Telegram custom emoji tags."""
+    if not text or EMOJI_RE is None:
+        return text
+
+    skip_pattern = r"(<tg-emoji\b[^>]*>.*?</tg-emoji>|<[^>]+>)"
+    parts = re.split(skip_pattern, str(text), flags=re.IGNORECASE | re.DOTALL)
+
+    def replacer(match):
+        raw_emoji = match.group(0)
+        # Strip variation selector to find in normalized dict
+        emoji = raw_emoji.replace(VARIATION_SELECTOR_16, "")
+        emoji_id = NORMALIZED_EMOJI_IDS.get(emoji)
+        if emoji_id:
+            fallback = "" if remove_fallback else raw_emoji
+            return f'<tg-emoji emoji-id="{emoji_id}">{fallback}</tg-emoji>'
+        return raw_emoji
+
+    return "".join(
+        part if re.fullmatch(skip_pattern, part, flags=re.IGNORECASE | re.DOTALL) else EMOJI_RE.sub(replacer, part)
+        for part in parts
+    )
+
+def apply_small_caps(text):
+    """Apply the bot's display font while preserving fragile HTML/code areas."""
+    if not isinstance(text, str) or not text:
+        return text
+
+    skip_pattern = (
+        r"(<tg-emoji\b[^>]*>.*?</tg-emoji>|"
+        r"<code\b[^>]*>.*?</code>|"
+        r"<pre\b[^>]*>.*?</pre>|"
+        r"<[^>]+>|"
+        r"&[#a-zA-Z0-9]+;|"
+        r"https?://\S+|"
+        r"/[a-zA-Z0-9_]+)"
+    )
+    parts = re.split(skip_pattern, text, flags=re.IGNORECASE | re.DOTALL)
+    return "".join(
+        part if re.fullmatch(skip_pattern, part, flags=re.IGNORECASE | re.DOTALL) else stylize_text(part)
+        for part in parts
+    )
+
+def format_display_text(text, parse_mode=None):
+    """Small-caps plus custom emoji for outgoing HTML text/captions."""
+    if not isinstance(text, str):
+        return text
+    if _is_html_parse_mode(parse_mode):
+        return apply_custom_emojis(apply_small_caps(text), remove_fallback=False)
+    return text
+
+def get_icon_id(text):
+    """Returns the custom emoji ID of the FIRST emoji found in the text and the emoji itself."""
+    if not text or EMOJI_RE is None:
+        return None, None
+
+    match = EMOJI_RE.search(str(text))
+    if match:
+        raw_emoji = match.group(0)
+        emoji = raw_emoji.replace(VARIATION_SELECTOR_16, "")
+        return NORMALIZED_EMOJI_IDS.get(emoji), raw_emoji
+    return None, None
+
+
+
+def custom_emoji_html(emoji_id, fallback):
+
+    """Render one exact Telegram custom emoji id, with a safe visible fallback."""
+    if not emoji_id:
+        return html.escape(str(fallback or ""))
+    fallback_text = html.escape(str(fallback or "\u2b50"))
+    return f'<tg-emoji emoji-id="{html.escape(str(emoji_id))}">{fallback_text}</tg-emoji>'
+
+
+DANGER_KEYWORDS = {"back", "cancel", "close", "exit", "delete", "remove", "return", "no", "deny", "stop", "dismiss", "clear", "revoked"}
+SUCCESS_KEYWORDS = {"add", "buy", "confirm", "yes", "claim", "start", "spin", "bet", "play", "roll", "win", "reward", "collect", "register", "join", "boost", "support", "save", "deposit", "daily"}
+
+_original_inline_button_init = InlineKeyboardButton.__init__
+
+def _patched_inline_button_init(self, text, callback_data=None, url=None, web_app=None, login_url=None, switch_inline_query=None, switch_inline_query_current_chat=None, switch_inline_query_chosen_chat=None, callback_game=None, pay=None, icon_custom_emoji_id=None, style=None, api_kwargs=None, **kwargs):
+    api_kwargs = dict(api_kwargs or {})
+
+    # WebApp buttons in Telegram Bot API cannot have custom style or custom emoji icons
+    if web_app:
+        icon_custom_emoji_id = None
+        api_kwargs.pop("style", None)
+    else:
+        # Auto-assign Bot API 9.4+ color style if not explicitly set
+        if "style" not in api_kwargs:
+            eff_style = style
+            if not eff_style:
+                lower_str = f"{str(text or '').lower()} {str(callback_data or '').lower()}"
+                if any(kw in lower_str for kw in DANGER_KEYWORDS):
+                    eff_style = "danger"
+                elif any(kw in lower_str for kw in SUCCESS_KEYWORDS):
+                    eff_style = "success"
+                else:
+                    eff_style = "primary"
+            if eff_style and str(eff_style).lower() in {"primary", "success", "danger"}:
+                api_kwargs["style"] = str(eff_style).lower()
+
+        # Extract custom emoji ID and strip duplicate text emoji
+        if not icon_custom_emoji_id:
+            eid, raw_emoji = get_icon_id(text)
+            if eid:
+                icon_custom_emoji_id = eid
+                if raw_emoji and text:
+                    text = text.replace(raw_emoji, "").strip()
+        else:
+            _, raw_emoji = get_icon_id(text)
+            if raw_emoji and text:
+                text = text.replace(raw_emoji, "").strip()
+
+    _original_inline_button_init(
+        self,
+        text=text or "",
+        callback_data=callback_data,
+        url=url,
+        web_app=web_app,
+        login_url=login_url,
+        switch_inline_query=switch_inline_query,
+        switch_inline_query_current_chat=switch_inline_query_current_chat,
+        switch_inline_query_chosen_chat=switch_inline_query_chosen_chat,
+        callback_game=callback_game,
+        pay=pay,
+        icon_custom_emoji_id=icon_custom_emoji_id,
+        api_kwargs=api_kwargs if api_kwargs else None,
+        **kwargs
+    )
+
+InlineKeyboardButton.__init__ = _patched_inline_button_init
+
+
+def Button(text, callback_data=None, url=None, **kwargs):
+    """A wrapper for InlineKeyboardButton that uses patched InlineKeyboardButton init."""
+    return InlineKeyboardButton(text=text, callback_data=callback_data, url=url, **kwargs)
+
+
+
+
+
+
+
+
+
+
+def _is_html_parse_mode(parse_mode):
+    return parse_mode == ParseMode.HTML or str(parse_mode).upper() == "HTML"
+
+def _customize_button_text(text, icon_custom_emoji_id=None):
+    if icon_custom_emoji_id or not isinstance(text, str):
+        return text, icon_custom_emoji_id
+
+    eid, emoji = get_icon_id(text)
+    if not eid:
+        return stylize_text(text), icon_custom_emoji_id
+
+    clean_text = text.replace(emoji, "", 1).strip()
+    return stylize_text(clean_text) or CUSTOM_EMOJI_BUTTON_LABEL, eid
+
+def _customize_text_kwargs(kwargs, key):
+    text = kwargs.get(key)
+    if not isinstance(text, str):
+        return
+
+    kwargs[key] = format_display_text(text, kwargs.get("parse_mode"))
+
+def _customize_media_caption(media):
+    caption = getattr(media, "caption", None)
+    parse_mode = getattr(media, "parse_mode", None)
+    if isinstance(caption, str) and _is_html_parse_mode(parse_mode):
+        try:
+            media.caption = format_display_text(caption, parse_mode)
+        except Exception:
+            pass
+    return media
+
+
+def _retry_attempts_for_method(method_name):
+    return TELEGRAM_EDIT_RETRY_ATTEMPTS if method_name.startswith("edit_") else TELEGRAM_RETRY_ATTEMPTS
+
+
+def _retry_delay_for_retry_after(retry_after):
+    if isinstance(retry_after, timedelta):
+        seconds = retry_after.total_seconds()
+    else:
+        try:
+            seconds = float(retry_after)
+        except (TypeError, ValueError):
+            return None
+    if seconds <= 0:
+        return None
+    return min(seconds, TELEGRAM_RETRY_AFTER_CAP_SECONDS)
+
+
+async def _call_with_telegram_retries(method_name, original, *args, **kwargs):
+    attempts = _retry_attempts_for_method(method_name)
+    for attempt in range(1, attempts + 1):
+        try:
+            return await original(*args, **kwargs)
+        except RetryAfter as exc:
+            retry_after = _retry_delay_for_retry_after(getattr(exc, "retry_after", None))
+            if retry_after is None or attempt >= attempts:
+                raise
+            await asyncio.sleep(retry_after)
+        except (TimedOut, NetworkError):
+            if attempt >= attempts:
+                raise
+            await asyncio.sleep(TELEGRAM_RETRY_BASE_DELAY * attempt)
+
+
+def _is_missing_reply_target(error):
+    return "message to be replied not found" in str(error).lower()
+
+
+def _without_reply_target(kwargs, supports_do_quote=False):
+    """Drop stale reply metadata so a useful message can still be delivered."""
+    fallback = dict(kwargs)
+    fallback.pop("reply_to_message_id", None)
+    fallback.pop("reply_parameters", None)
+    if supports_do_quote:
+        fallback["do_quote"] = False
+    return fallback
+
+def install_custom_emoji_monkey_patch():
+    """Apply mapped custom emojis globally for buttons and HTML messages."""
+    if getattr(InlineKeyboardButton, "_kazumi_custom_emoji_patched", False):
+        return
+
+    original_button_init = InlineKeyboardButton.__init__
+
+    @functools.wraps(original_button_init)
+    def patched_button_init(self, *args, **kwargs):
+        if kwargs.get("web_app"):
+            return original_button_init(self, *args, **kwargs)
+        if "text" in kwargs:
+            text, eid = _customize_button_text(kwargs["text"], kwargs.get("icon_custom_emoji_id"))
+            kwargs["text"] = text
+            if eid:
+                kwargs["icon_custom_emoji_id"] = eid
+        elif args:
+            first_arg, *rest = args
+            text, eid = _customize_button_text(first_arg, kwargs.get("icon_custom_emoji_id"))
+            args = (text, *rest)
+            if eid:
+                kwargs["icon_custom_emoji_id"] = eid
+        return original_button_init(self, *args, **kwargs)
+
+
+
+    InlineKeyboardButton.__init__ = patched_button_init
+    InlineKeyboardButton._kazumi_custom_emoji_patched = True
+
+    def patch_async_method(owner, method_name, text_keys=(), media_key=None):
+        original = getattr(owner, method_name, None)
+        if original is None or getattr(original, "_kazumi_custom_emoji_patched", False):
+            return
+        signature = inspect.signature(original)
+
+        @functools.wraps(original)
+        async def patched(self, *args, **kwargs):
+            bound = signature.bind_partial(self, *args, **kwargs)
+            for key in text_keys:
+                if key in bound.arguments:
+                    value = bound.arguments[key]
+                    parse_mode = bound.arguments.get("parse_mode")
+                    if isinstance(value, str) and _is_html_parse_mode(parse_mode):
+                        bound.arguments[key] = format_display_text(value, parse_mode)
+            if media_key and media_key in bound.arguments:
+                bound.arguments[media_key] = _customize_media_caption(bound.arguments[media_key])
+            try:
+                return await _call_with_telegram_retries(method_name, original, *bound.args, **bound.kwargs)
+            except BadRequest as exc:
+                if not _is_missing_reply_target(exc):
+                    raise
+                # The source message can disappear while a handler is running.
+                # Retry once without reply metadata instead of losing the response.
+                fallback_kwargs = _without_reply_target(
+                    bound.kwargs,
+                    supports_do_quote="do_quote" in signature.parameters,
+                )
+                return await _call_with_telegram_retries(
+                    method_name,
+                    original,
+                    *bound.args,
+                    **fallback_kwargs,
+                )
+
+        patched._kazumi_custom_emoji_patched = True
+        setattr(owner, method_name, patched)
+
+    for owner in (Bot, ExtBot):
+        patch_async_method(owner, "answer_callback_query")
+        patch_async_method(owner, "send_message", text_keys=("text",))
+        patch_async_method(owner, "send_photo", text_keys=("caption",))
+        patch_async_method(owner, "send_video", text_keys=("caption",))
+        patch_async_method(owner, "send_animation", text_keys=("caption",))
+        patch_async_method(owner, "send_document", text_keys=("caption",))
+        patch_async_method(owner, "edit_message_text", text_keys=("text",))
+        patch_async_method(owner, "edit_message_caption", text_keys=("caption",))
+        patch_async_method(owner, "edit_message_media", media_key="media")
+
+    patch_async_method(Message, "reply_text", text_keys=("text",))
+    patch_async_method(Message, "reply_photo", text_keys=("caption",))
+    patch_async_method(Message, "reply_video", text_keys=("caption",))
+    patch_async_method(Message, "reply_animation", text_keys=("caption",))
+    patch_async_method(Message, "reply_document", text_keys=("caption",))
+    patch_async_method(Message, "edit_text", text_keys=("text",))
+    patch_async_method(Message, "edit_caption", text_keys=("caption",))
+    patch_async_method(Message, "edit_media", media_key="media")
+
+install_custom_emoji_monkey_patch()
+
+# --- ULTIMATE DASHBOARD LOGGER ---
+async def log_to_channel(bot: Bot, event_type: str, details: dict):
+    if LOGGER_ID == 0: return
+    now = datetime.now().strftime("%I:%M:%S %p | %d %b")
+
+    # Headers
+    headers = {
+        "start": f"{EMOJI_FLOWER} <b>{stylize_text('SYSTEM ONLINE')}</b>",
+        "join": f"{EMOJI_CLINK} <b>{stylize_text('NEW GROUP JOINED')}</b>",
+        "leave": f"{EMOJI_BROKEN_HEART} <b>{stylize_text('LEFT GROUP')}</b>",
+        "command": f"{EMOJI_POLICE_WOMAN} <b>{stylize_text('ADMIN COMMAND')}</b>",
+        "transfer": f"{EMOJI_MONEY_WINGS} <b>{stylize_text('TRANSACTION')}</b>"
+    }
+    header = headers.get(event_type, f"{EMOJI_SCROLL} <b>{stylize_text('LOG ENTRY')}</b>")
+
+    # Build Message
+    text = f"{header}\n━━━━━━━━━━━━━━━━━━\n"
+
+    # User Section
+    if 'user' in details:
+        text += f"{EMOJI_USER} <b>{stylize_text('User')}:</b> {details['user']}\n"
+
+    # Chat Section
+    if 'chat' in details:
+        text += f"{EMOJI_CASTLE} <b>{stylize_text('Chat')}:</b> {html.escape(details['chat'])}\n"
+
+    # Action/Content Section
+    if 'action' in details:
+        text += f"{EMOJI_ACTION} <b>{stylize_text('Action')}:</b> {details['action']}\n"
+
+    # Group Link Handling
+    if 'link' in details:
+        link_val = details['link']
+        if link_val and link_val.startswith("http"):
+            text += f"{EMOJI_LINK} <b>{stylize_text('Invite')}:</b> <a href='{link_val}'>Click to Join</a>\n"
+        else:
+            text += f"{EMOJI_LOCK} <b>{stylize_text('Invite')}:</b> <i>Hidden/Private</i>\n"
+
+    # Footer
+    text += f"━━━━━━━━━━━━━━━━━━\n{EMOJI_CLOCK} <code>{now}</code>"
+
+    try: 
+        await bot.send_message(
+            chat_id=LOGGER_ID, 
+            text=text, 
+            parse_mode=ParseMode.HTML, 
+            disable_web_page_preview=True
+        )
+    except Exception as e:
+        print(f"Log Error: {e}")
+
+# --- HELPERS ---
+
+def get_user_badge(user_doc):
+    """Returns the profile icon based on premium status."""
+    if not user_doc: return EMOJI_USER
+    if user_doc.get("custom_emoji_id"):
+        return custom_emoji_html(user_doc["custom_emoji_id"], user_doc.get("custom_emoji") or "\u2b50")
+    if user_doc.get("custom_emoji"): return user_doc["custom_emoji"]
+    if premium_is_active_doc(user_doc): return EMOJI_HEARTS
+    return EMOJI_USER
+
+def premium_is_active_doc(user_doc):
+    if not user_doc:
+        return False
+    if user_doc.get("premium_lifetime"):
+        return True
+    premium_until = user_doc.get("premium_until")
+    if premium_until and premium_until > datetime.utcnow():
+        return True
+    return bool(user_doc.get("is_premium") and not premium_until)
+
+def is_premium(user_id):
+    """Check if a user has premium status."""
+    user = users_collection.find_one({"user_id": user_id})
+    return premium_is_active_doc(user) if user else False
+
+def get_mention(user_data, custom_name=None, include_badge=False):
+    """
+    Robust mention generator. 
+    Works for: User Objects, Dicts, and users without @usernames.
+    """
+    if isinstance(user_data, (User, Chat)):
+        uid = user_data.id
+        first_name = user_data.first_name if hasattr(user_data, "first_name") else user_data.title
+        # If we need badge for User object, we have to fetch from DB
+        badge = ""
+        if include_badge:
+            user_doc = users_collection.find_one({"user_id": uid})
+            badge = get_user_badge(user_doc) + " "
+    elif isinstance(user_data, dict):
+        uid = user_data.get("user_id")
+        first_name = user_data.get("name", "User")
+        badge = get_user_badge(user_data) + " " if include_badge else ""
+    else:
+        return "Unknown"
+
+    name = custom_name or first_name
+    safe_name = html.escape(name)
+
+    if not uid:
+        return f"{badge}{safe_name}"
+    return f"{badge}<a href='tg://user?id={html.escape(str(uid))}'>{safe_name}</a>"
+
+def check_auto_revive(user_doc):
+    try:
+        if user_doc['status'] != 'dead': return False
+        death_time = user_doc.get('death_time')
+        if not death_time: return False
+
+        if datetime.utcnow() - death_time > timedelta(hours=AUTO_REVIVE_HOURS):
+            users_collection.update_one(
+                {"user_id": user_doc["user_id"]}, 
+                {
+                    "$set": {"status": "alive", "death_time": None},
+                    "$inc": {"balance": AUTO_REVIVE_BONUS}
+                }
+            )
+            return True
+    except: pass
+    return False
+
+_USER_DOC_CACHE = collections.OrderedDict()
+_USER_CACHE_TTL = 30.0  # seconds — raised from 10 to reduce DB hits
+_MAX_USER_CACHE = 5_000
+
+def invalidate_user_cache(user_id: int):
+    """Purge user from memory cache after balance or inventory mutation."""
+    try:
+        _USER_DOC_CACHE.pop(int(user_id), None)
+    except Exception:
+        pass
+
+def ensure_user_exists(tg_user):
+    if not tg_user:
+        return None
+    user_id = getattr(tg_user, "id", None)
+    if not user_id:
+        return None
+
+    now_ts = time.monotonic()
+    cached = _USER_DOC_CACHE.get(user_id)
+    if cached and (now_ts - cached["cached_at"]) < _USER_CACHE_TTL:
+        _USER_DOC_CACHE.move_to_end(user_id)  # keep recently accessed items
+        return cached["doc"]
+
+    try:
+        user_doc = users_collection.find_one({"user_id": user_id})
+        username = tg_user.username.lower() if getattr(tg_user, "username", None) else None
+
+        if not user_doc:
+            new_user = {
+                "user_id": user_id, 
+                "name": getattr(tg_user, "first_name", "User"), 
+                "username": username, 
+                "is_bot": getattr(tg_user, "is_bot", False),
+                "balance": 0, "inventory": [], "waifus": [], "daily_streak": 0, "last_daily": None,
+                "kills": 0, "deaths": 0, "status": "alive", "protection_expiry": datetime.utcnow(), 
+                "registered_at": datetime.utcnow(), "death_time": None, "seen_groups": []
+            }
+            users_collection.insert_one(new_user)
+            _USER_DOC_CACHE[user_id] = {"doc": new_user, "cached_at": now_ts}
+            _evict_cache(_USER_DOC_CACHE, _MAX_USER_CACHE)
+            return new_user
+        else:
+            if user_doc.get("is_premium") and user_doc.get("premium_until") and not user_doc.get("premium_lifetime") and user_doc["premium_until"] <= datetime.utcnow():
+                users_collection.update_one({"user_id": user_id}, {"$set": {"is_premium": False, "premium_plan": None}})
+                user_doc["is_premium"] = False
+                user_doc["premium_plan"] = None
+
+            if check_auto_revive(user_doc): 
+                user_doc['status'] = 'alive'
+                user_doc['balance'] += AUTO_REVIVE_BONUS
+
+            updates = {}
+            if user_doc.get("username") != username: updates["username"] = username
+            if user_doc.get("name") != getattr(tg_user, "first_name", "User"): updates["name"] = getattr(tg_user, "first_name", "User")
+            if user_doc.get("is_bot") != getattr(tg_user, "is_bot", False): updates["is_bot"] = getattr(tg_user, "is_bot", False)
+            if "waifu_coins" in user_doc: users_collection.update_one({"user_id": user_id}, {"$unset": {"waifu_coins": ""}})
+
+            if updates: users_collection.update_one({"user_id": user_id}, {"$set": updates})
+            _USER_DOC_CACHE[user_id] = {"doc": user_doc, "cached_at": now_ts}
+            _evict_cache(_USER_DOC_CACHE, _MAX_USER_CACHE)
+            return user_doc
+    except Exception as e:
+        print(f"DB Error: {e}")
+        return {
+            "user_id": user_id, "name": getattr(tg_user, "first_name", "User"), 
+            "balance": 0, "inventory": [], "kills": 0, "status": "alive"
+        }
+
+
+def _evict_cache(cache: collections.OrderedDict, max_size: int):
+    """Remove oldest entries if cache exceeds max_size."""
+    while len(cache) > max_size:
+        cache.popitem(last=False)
+
+
+async def async_ensure_user_exists(tg_user):
+    """Non-blocking version of ensure_user_exists — runs DB calls in a thread."""
+    return await asyncio.to_thread(ensure_user_exists, tg_user)
+
+
+def track_group(chat, user=None):
+    """Safe Group Tracker.
+
+    Keep this lightweight: it runs on group traffic, so we store activity
+    ticks instead of writing to Mongo for every single chat message.
+    """
+    try:
+        if chat.type in [ChatType.GROUP, ChatType.SUPERGROUP]:
+            now = datetime.utcnow()
+            today = now.strftime("%Y-%m-%d")
+            ts = time.time()
+            group_key = ("group", chat.id)
+            if ts - _TRACK_CACHE.get(group_key, 0) >= _TRACK_INTERVAL:
+                _TRACK_CACHE[group_key] = ts
+                groups_collection.update_one(
+                    {"chat_id": chat.id},
+                    {
+                        "$set": {"title": chat.title, "last_active_at": now},
+                        "$setOnInsert": {"claimed": False, "created_at": now},
+                        "$inc": {"activity_ticks": 1, f"daily_activity.{today}": 1},
+                    },
+                    upsert=True,
+                )
+            if user:
+                user_key = ("user", user.id)
+                if ts - _TRACK_CACHE.get(user_key, 0) < _TRACK_INTERVAL:
+                    return
+                _TRACK_CACHE[user_key] = ts
+                users_collection.update_one(
+                    {"user_id": user.id}, 
+                    {
+                        "$set": {"last_active_at": now},
+                        "$addToSet": {"seen_groups": chat.id},
+                        "$inc": {"activity_ticks": 1, f"daily_activity.{today}": 1},
+                    }
+                )
+    except Exception as e:
+        print(f"Track Group Error: {e}")
+    finally:
+        _evict_cache(_TRACK_CACHE, _MAX_TRACK_CACHE)
+
+
+async def async_track_group(chat, user=None):
+    """Non-blocking version of track_group — runs DB calls in a thread."""
+    await asyncio.to_thread(track_group, chat, user)
+
+
+MAX_MONGO_INT64 = 9_223_372_036_854_775_807
+
+
+async def resolve_target(update, context, specific_arg=None):
+    message = getattr(update, "effective_message", None) or getattr(update, "message", None)
+
+    # 1. Reply
+    if message and message.reply_to_message:
+        return ensure_user_exists(message.reply_to_message.from_user), None
+
+    # 2. Argument
+    query = specific_arg if specific_arg else (context.args[0] if context.args else None)
+    if not query: return None, "No target"
+
+    # 3. Lookup
+    if query.isdigit():
+        target_id = int(query)
+        if target_id > MAX_MONGO_INT64:
+            return None, f"{EMOJI_CROSS} <b>{stylize_text('Kazumi says nope')}!</b> ID <code>{query[:32]}...</code> is invalid."
+        doc = users_collection.find_one({"user_id": target_id})
+        if doc: return doc, None
+        chat = getattr(update, "effective_chat", None)
+        if chat and chat.type in [ChatType.GROUP, ChatType.SUPERGROUP]:
+            try:
+                member = await context.bot.get_chat_member(chat.id, target_id)
+                status = str(getattr(member, "status", "")).lower()
+                if "left" not in status and "kicked" not in status:
+                    doc = ensure_user_exists(member.user)
+                    users_collection.update_one(
+                        {"user_id": target_id},
+                        {"$addToSet": {"seen_groups": chat.id}, "$set": {"last_active_at": datetime.utcnow()}},
+                    )
+                    return users_collection.find_one({"user_id": target_id}) or doc, None
+            except TelegramError:
+                pass
+        return None, f"{EMOJI_CROSS} <b>{stylize_text('Kazumi says nope')}!</b> ID <code>{query}</code> not found."
+
+    clean_username = query.replace("@", "").lower()
+    doc = users_collection.find_one({"username": clean_username})
+    if doc: return doc, None
+
+    return None, f"{EMOJI_CROSS} <b>{stylize_text('Oops')}!</b> User <code>@{clean_username}</code> has not started me."
+
+# --- MISSING FUNCTIONS RESTORED BELOW ---
+
+def _as_utc_naive_datetime(value):
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            return value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+                try:
+                    parsed = datetime.strptime(text, fmt)
+                    break
+                except ValueError:
+                    parsed = None
+            if not parsed:
+                return None
+        if parsed.tzinfo is not None:
+            return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
+    return None
+
+def remove_one_inventory_item(user_doc, item_id):
+    inventory = list(user_doc.get("inventory", []) or [])
+    removed = next(
+        (item for item in inventory if isinstance(item, dict) and item.get("id") == item_id),
+        None,
+    )
+    if not removed:
+        return None
+    result = users_collection.update_one(
+        {"user_id": user_doc["user_id"], "inventory.id": item_id},
+        {"$unset": {"inventory.$": ""}},
+    )
+    if not result.modified_count:
+        return None
+    users_collection.update_one(
+        {"user_id": user_doc["user_id"]},
+        {"$pull": {"inventory": None}},
+    )
+    return removed
+
+def get_own_protection_expiry(user_data):
+    ud = user_data or {}
+    # Check both new field name and legacy field name for backward compatibility
+    expiry = _as_utc_naive_datetime(ud.get("protection_expiry") or ud.get("protected_until"))
+    return cap_protection_expiry(user_data, expiry)
+
+def daily_streak_bonus(streak):
+    try:
+        streak = int(streak or 0)
+    except (TypeError, ValueError):
+        streak = 0
+    return min(max(streak - 1, 0) * DAILY_STREAK_BONUS_STEP, DAILY_STREAK_BONUS_CAP)
+
+def protection_max_duration(user_data):
+    return PROTECTION_PREMIUM_MAX_DURATION if premium_is_active_doc(user_data) else PROTECTION_FREE_MAX_DURATION
+
+def cap_protection_expiry(user_data, expiry, now=None):
+    expiry = _as_utc_naive_datetime(expiry)
+    if not expiry:
+        return None
+    now = now or datetime.utcnow()
+    if expiry <= now:
+        return None
+    # Stars-purchased Anti-Rob Guard sets up to 7 days — don't cap below that
+    anti_rob = _as_utc_naive_datetime((user_data or {}).get("anti_rob_until"))
+    if anti_rob and anti_rob > now:
+        max_cap = max(protection_max_duration(user_data), timedelta(days=7))
+    else:
+        max_cap = protection_max_duration(user_data)
+    return min(expiry, now + max_cap)
+
+def get_active_protection(user_data):
+    """Checks self and partner protection expiry."""
+    try:
+        now = datetime.utcnow()
+        self_expiry = get_own_protection_expiry(user_data)
+        partner_expiry = None
+        partner_id = user_data.get("partner_id")
+        
+        if partner_id:
+            partner = users_collection.find_one({"user_id": partner_id})
+            if partner:
+                partner_expiry = get_own_protection_expiry(partner)
+            
+        valid_expiries = []
+        if self_expiry and self_expiry > now: valid_expiries.append(self_expiry)
+        if partner_expiry and partner_expiry > now: valid_expiries.append(partner_expiry)
+        
+        if not valid_expiries: return None
+        return cap_protection_expiry(user_data, max(valid_expiries), now)
+    except Exception as exc:
+        print(f"Protection Check Error: {exc}")
+        return None
+
+def is_protected(user_data):
+    return get_active_protection(user_data) is not None
+
+def parse_money(value):
+    if value is None:
+        return None
+    val_str = str(value).strip().lower()
+    if val_str == "all":
+        return "all"
+
+    match = re.search(r'(\d+(?:\.\d+)?)\s*([kmb])?', val_str)
+    if not match:
+        return None
+    num_part = float(match.group(1))
+    suffix = match.group(2)
+    if suffix == 'k':
+        num_part *= 1_000
+    elif suffix == 'm':
+        num_part *= 1_000_000
+    elif suffix == 'b':
+        num_part *= 1_000_000_000
+    return int(num_part)
+
+def format_money(amount): return f"${amount:,}"
+
+def format_time(timedelta_obj):
+    total_seconds = int(timedelta_obj.total_seconds())
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, _ = divmod(remainder, 60)
+    return f"{hours}h {minutes}m"
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# XP & LEVEL SYSTEM (NEW!)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def get_level_info(xp):
+    """Returns (level, current_xp_in_level, xp_needed_for_next)."""
+    level = 0
+    needed = LEVEL_UP_BASE
+    while xp >= needed:
+        xp -= needed
+        level += 1
+        needed = int(LEVEL_UP_BASE * (LEVEL_UP_MULTIPLIER ** level))
+    return level, xp, needed
+
+async def add_xp(user_id, amount):
+    """Add XP to user, handle level ups, return (new_level, leveled_up)."""
+    user = users_collection.find_one({"user_id": user_id})
+    if not user: return 0, False
+    
+    old_xp = user.get("xp", 0)
+    old_level, _, _ = get_level_info(old_xp)
+    
+    new_xp = old_xp + amount
+    new_level, _, _ = get_level_info(new_xp)
+    
+    update_data = {"$inc": {"xp": amount}}
+    
+    leveled_up = new_level > old_level
+    if leveled_up:
+        levels_gained = new_level - old_level
+        coin_reward = LEVEL_COIN_REWARD * levels_gained
+        update_data["$inc"]["balance"] = coin_reward
+    
+    users_collection.update_one({"user_id": user_id}, update_data)
+    return new_level, leveled_up

@@ -107,9 +107,12 @@ _GROQ_KEY_COOLDOWNS = {}
 _GROK_PROXY_COOLDOWN_UNTIL = 0
 _PROVIDER_TIMEOUT_COOLDOWNS = {}
 _PROVIDER_LOG_LAST = {}
-# Conversational replies must fail fast. Sequential provider timeouts used to
-# make a single Telegram message wait 25-30 seconds before Kazumi answered.
-_PROVIDER_TIMEOUTS = {"mistral": 3.5, "groq": 3.5, "codestral": 4, "grok_proxy": 3}
+# Conversational replies should remain interactive even while a provider is
+# degraded.  A provider that does not start responding quickly is skipped and
+# the normal fallback answer is returned instead of holding a Telegram update.
+_PROVIDER_TIMEOUTS = {"mistral": 2.5, "groq": 2.5, "codestral": 3.0, "grok_proxy": 2.5}
+_GROQ_MODEL_PROBE_TIMEOUT = 2.5
+_AI_RESPONSE_BUDGET_SECONDS = 4.5
 
 
 def _log_provider_event(provider: str, event: str, message: str, interval: int = 60) -> None:
@@ -431,7 +434,9 @@ async def detect_working_groq_model():
                 "temperature": 0.5
             }
 
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(_GROQ_MODEL_PROBE_TIMEOUT, connect=1.5)
+            ) as client:
                 resp = await client.post(
                     MODELS["groq"]["url"],
                     json=payload,
@@ -453,6 +458,13 @@ async def detect_working_groq_model():
                 else:
                     print(f"❌ {model_name} not available (status {resp.status_code})")
 
+        except httpx.TimeoutException:
+            # All candidates use the same endpoint; probing every model after
+            # a network timeout only makes the first AI message painfully slow.
+            _GROQ_COOLDOWN_UNTIL = time.time() + 60
+            _GROQ_MODEL_CHECKED = True
+            _log_provider_event("groq", "probe_timeout", "⏰ GROQ model probe timed out; cooling down")
+            return None
         except Exception as e:
             print(f"❌ {model_name} test failed: {str(e)[:50]}")
             continue
@@ -661,8 +673,24 @@ async def get_ai_response(chat_id: int, user_input: str, user_name: str, selecte
         _log_provider_event(model_name, "attempt", label, interval=30)
         return await call_model_api(model_name, messages, max_tokens)
 
+    generation_started = time.monotonic()
+
+    async def try_within_budget(model_name: str, label: str):
+        remaining = _AI_RESPONSE_BUDGET_SECONDS - (time.monotonic() - generation_started)
+        if remaining <= 0:
+            return None
+        try:
+            return await asyncio.wait_for(try_model(model_name, label), timeout=remaining)
+        except asyncio.TimeoutError:
+            _log_provider_event(
+                model_name,
+                "response_budget",
+                "⏱️ AI response budget reached; using a fast local fallback",
+            )
+            return None
+
     # Try 1: User's preferred model (or auto-selected for code)
-    reply = await try_model(active_model, f"🎯 Attempting {active_model.upper()} (primary choice)")
+    reply = await try_within_budget(active_model, f"🎯 Attempting {active_model.upper()} (primary choice)")
 
     # Keep the fallback chain fast and relevant. Grok proxy is optional and
     # Codestral is only useful for code, so neither should delay normal chat.
@@ -676,7 +704,7 @@ async def get_ai_response(chat_id: int, user_input: str, user_name: str, selecte
         has_key = bool(conf.get("key") or conf.get("auth_optional"))
         if not has_key or (model_name == "grok_proxy" and not conf.get("enabled")):
             continue
-        reply = await try_model(model_name, f"🔄 Falling back to {model_name.upper()}")
+        reply = await try_within_budget(model_name, f"🔄 Falling back to {model_name.upper()}")
 
     # Fallback 6: Hardcoded responses
     if not reply:

@@ -263,13 +263,6 @@ def _patched_inline_button_init(self, text, callback_data=None, url=None, web_ap
             if raw_emoji and text:
                 text = text.replace(raw_emoji, "").strip()
 
-    # PTB 21.x does not yet expose these newer Bot API fields in its
-    # constructor.  Supplying them through ``api_kwargs`` keeps them in the
-    # outgoing JSON without crashing construction on supported PTB versions.
-    # They must never be passed as named constructor arguments.
-    if icon_custom_emoji_id:
-        api_kwargs["icon_custom_emoji_id"] = str(icon_custom_emoji_id)
-
     _original_inline_button_init(
         self,
         text=text or "",
@@ -282,12 +275,10 @@ def _patched_inline_button_init(self, text, callback_data=None, url=None, web_ap
         switch_inline_query_chosen_chat=switch_inline_query_chosen_chat,
         callback_game=callback_game,
         pay=pay,
+        icon_custom_emoji_id=icon_custom_emoji_id,
         api_kwargs=api_kwargs if api_kwargs else None,
         **kwargs
     )
-
-    # Retain the value for the button-customisation layer and debugging.
-    self.icon_custom_emoji_id = icon_custom_emoji_id
 
 InlineKeyboardButton.__init__ = _patched_inline_button_init
 
